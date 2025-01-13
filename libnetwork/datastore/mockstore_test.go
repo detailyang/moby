@@ -62,14 +62,16 @@ func (s *MockStore) AtomicPut(key string, newValue []byte, previous *store.KVPai
 	if previous == nil {
 		if mData != nil {
 			return nil, types.InvalidParameterErrorf("atomic put failed because key exists")
-		} // Else OK.
+		}
+		// Else OK.
 	} else {
 		if mData == nil {
 			return nil, types.InvalidParameterErrorf("atomic put failed because key exists")
 		}
-		if mData != nil && mData.Index != previous.LastIndex {
+		if mData.Index != previous.LastIndex {
 			return nil, types.InvalidParameterErrorf("atomic put failed due to mismatched Index")
-		} // Else OK.
+		}
+		// Else OK.
 	}
 	if err := s.Put(key, newValue); err != nil {
 		return nil, err
@@ -83,6 +85,16 @@ func (s *MockStore) AtomicDelete(key string, previous *store.KVPair) error {
 	mData := s.db[key]
 	if mData != nil && mData.Index != previous.LastIndex {
 		return types.InvalidParameterErrorf("atomic delete failed due to mismatched Index")
+	}
+	delete(s.db, key)
+	return nil
+}
+
+// Delete deletes a value at "key". Unlike AtomicDelete it doesn't check
+// whether the deleted key is at a specific version before deleting.
+func (s *MockStore) Delete(key string) error {
+	if _, ok := s.db[key]; !ok {
+		return store.ErrKeyNotFound
 	}
 	delete(s.db, key)
 	return nil

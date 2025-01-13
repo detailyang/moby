@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/versions"
@@ -185,7 +184,7 @@ func TestRunConsoleSize(t *testing.T) {
 		container.WithConsoleSize(57, 123),
 	)
 
-	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
 
 	out, err := apiClient.ContainerLogs(ctx, cID, containertypes.LogsOptions{ShowStdout: true})
 	assert.NilError(t, err)
@@ -209,18 +208,8 @@ func TestRunWithAlternativeContainerdShim(t *testing.T) {
 	realShimPath, err = filepath.Abs(realShimPath)
 	assert.Assert(t, err)
 
-	// t.TempDir() can't be used here as the temporary directory returned by
-	// that function cannot be accessed by the fake-root user for rootless
-	// Docker. It creates a nested hierarchy of directories where the
-	// outermost has permission 0700.
-	shimDir, err := os.MkdirTemp("", t.Name())
+	shimDir := testutil.TempDir(t)
 	assert.Assert(t, err)
-	t.Cleanup(func() {
-		if err := os.RemoveAll(shimDir); err != nil {
-			t.Errorf("shimDir RemoveAll cleanup: %v", err)
-		}
-	})
-	assert.Assert(t, os.Chmod(shimDir, 0o777))
 	shimDir, err = filepath.Abs(shimDir)
 	assert.Assert(t, err)
 	assert.Assert(t, os.Symlink(realShimPath, filepath.Join(shimDir, "containerd-shim-realfake-v42")))
@@ -240,7 +229,7 @@ func TestRunWithAlternativeContainerdShim(t *testing.T) {
 		container.WithRuntime("io.containerd.realfake.v42"),
 	)
 
-	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
 
 	out, err := apiClient.ContainerLogs(ctx, cID, containertypes.LogsOptions{ShowStdout: true})
 	assert.NilError(t, err)
@@ -260,7 +249,7 @@ func TestRunWithAlternativeContainerdShim(t *testing.T) {
 		container.WithCmd("sh", "-c", `echo 'Hello, world!'`),
 	)
 
-	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
 
 	out, err = apiClient.ContainerLogs(ctx, cID, containertypes.LogsOptions{ShowStdout: true})
 	assert.NilError(t, err)
@@ -298,4 +287,115 @@ func TestMacAddressIsAppliedToMainNetworkWithShortID(t *testing.T) {
 
 	c := container.Inspect(ctx, t, apiClient, cid)
 	assert.Equal(t, c.NetworkSettings.Networks["testnet"].MacAddress, "02:42:08:26:a9:55")
+}
+
+func TestStaticIPOutsideSubpool(t *testing.T) {
+	skip.If(t, testEnv.IsRemoteDaemon)
+	skip.If(t, testEnv.DaemonInfo.OSType != "linux")
+
+	ctx := testutil.StartSpan(baseContext, t)
+
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+
+	apiClient, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("1.43"))
+	assert.NilError(t, err)
+
+	const netname = "subnet-range"
+	n := net.CreateNoError(ctx, t, apiClient, netname, net.WithIPAMRange("10.42.0.0/16", "10.42.128.0/24", "10.42.0.1"))
+	defer net.RemoveNoError(ctx, t, apiClient, n)
+
+	cID := container.Run(ctx, t, apiClient,
+		container.WithImage("busybox:latest"),
+		container.WithCmd("sh", "-c", `ip -4 -oneline addr show eth0`),
+		container.WithNetworkMode(netname),
+		container.WithIPv4(netname, "10.42.1.3"),
+	)
+
+	poll.WaitOn(t, container.IsStopped(ctx, apiClient, cID))
+
+	out, err := apiClient.ContainerLogs(ctx, cID, containertypes.LogsOptions{ShowStdout: true})
+	assert.NilError(t, err)
+	defer out.Close()
+
+	var b bytes.Buffer
+	_, err = io.Copy(&b, out)
+	assert.NilError(t, err)
+
+	assert.Check(t, is.Contains(b.String(), "inet 10.42.1.3/16"))
+}
+
+func TestWorkingDirNormalization(t *testing.T) {
+	ctx := setupTest(t)
+	apiClient := testEnv.APIClient()
+
+	for _, tc := range []struct {
+		name    string
+		workdir string
+	}{
+		{name: "trailing slash", workdir: "/tmp/"},
+		{name: "no trailing slash", workdir: "/tmp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cID := container.Run(ctx, t, apiClient,
+				container.WithImage("busybox"),
+				container.WithWorkingDir(tc.workdir),
+			)
+
+			defer container.Remove(ctx, t, apiClient, cID, containertypes.RemoveOptions{Force: true})
+
+			inspect := container.Inspect(ctx, t, apiClient, cID)
+
+			assert.Check(t, is.Equal(inspect.Config.WorkingDir, "/tmp"))
+		})
+	}
+}
+
+func TestSeccomp(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType != "linux")
+
+	ctx := setupTest(t)
+	apiClient := testEnv.APIClient()
+
+	const confined = `{
+ "defaultAction": "SCMP_ACT_ALLOW",
+ "syscalls": [ { "names": [ "chown", "chown32", "fchownat" ], "action": "SCMP_ACT_ERRNO" } ]
+}
+`
+	type testCase struct {
+		ops              []func(*container.TestContainerConfig)
+		expectedExitCode int
+	}
+	testCases := []testCase{
+		{
+			ops:              nil,
+			expectedExitCode: 0,
+		},
+		{
+			ops:              []func(*container.TestContainerConfig){container.WithPrivileged(true)},
+			expectedExitCode: 0,
+		},
+		{
+			ops:              []func(*container.TestContainerConfig){container.WithSecurityOpt("seccomp=" + confined)},
+			expectedExitCode: 1,
+		},
+		{
+			// A custom profile should be still enabled, even when --privileged is set
+			// https://github.com/moby/moby/issues/47499
+			ops:              []func(*container.TestContainerConfig){container.WithPrivileged(true), container.WithSecurityOpt("seccomp=" + confined)},
+			expectedExitCode: 1,
+		},
+	}
+	for _, tc := range testCases {
+		cID := container.Run(ctx, t, apiClient, tc.ops...)
+		res, err := container.Exec(ctx, apiClient, cID, []string{"chown", "42", "/bin/true"})
+		assert.NilError(t, err)
+		assert.Equal(t, tc.expectedExitCode, res.ExitCode)
+		if tc.expectedExitCode != 0 {
+			assert.Check(t, is.Contains(res.Stderr(), "Operation not permitted"))
+		}
+	}
 }

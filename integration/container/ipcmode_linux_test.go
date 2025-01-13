@@ -28,6 +28,8 @@ import (
 //	29 23 0:24 / /dev/shm rw,nosuid,nodev shared:4 - tmpfs tmpfs rw
 //	^^^^\
 //	     - this is the minor:major we look for
+//
+//nolint:dupword
 func testIpcCheckDevExists(mm string) (bool, error) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
@@ -97,7 +99,7 @@ func TestIpcModeNone(t *testing.T) {
 	testIpcNonePrivateShareable(t, "none", false, false)
 }
 
-// TestAPIIpcModePrivate checks the container private IPC mode
+// TestIpcModePrivate checks the container private IPC mode
 // (--ipc private) works as expected. It gets the minor:major pair
 // of /dev/shm mount from the container, and makes sure there is no
 // such pair on the host.
@@ -107,7 +109,7 @@ func TestIpcModePrivate(t *testing.T) {
 	testIpcNonePrivateShareable(t, "private", true, false)
 }
 
-// TestAPIIpcModeShareable checks the container shareable IPC mode
+// TestIpcModeShareable checks the container shareable IPC mode
 // (--ipc shareable) works as expected. It gets the minor:major pair
 // of /dev/shm mount from the container, and makes sure such pair
 // also exists on the host.
@@ -171,7 +173,7 @@ func testIpcContainer(t *testing.T, donorMode string, mustWork bool) {
 	assert.Check(t, is.Equal(true, regexp.MustCompile("^covfefe$").MatchString(out)))
 }
 
-// TestAPIIpcModeShareableAndPrivate checks that
+// TestAPIIpcModeShareableAndContainer checks that
 // 1) a container created with --ipc container:ID can use IPC of another shareable container.
 // 2) a container created with --ipc container:ID can NOT use IPC of another private container.
 func TestAPIIpcModeShareableAndContainer(t *testing.T) {

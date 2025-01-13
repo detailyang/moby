@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration-cli/checker"
 	"github.com/docker/docker/integration-cli/cli"
@@ -65,10 +65,9 @@ func (s *DockerAPISuite) TestExecAPICreateContainerPaused(c *testing.T) {
 	assert.NilError(c, err)
 	defer apiClient.Close()
 
-	config := types.ExecConfig{
+	_, err = apiClient.ContainerExecCreate(testutil.GetContext(c), name, container.ExecOptions{
 		Cmd: []string{"true"},
-	}
-	_, err = apiClient.ContainerExecCreate(testutil.GetContext(c), name, config)
+	})
 	assert.ErrorContains(c, err, "Container "+name+" is paused, unpause the container before exec", "Expected message when creating exec command with Container %s is paused", name)
 }
 
@@ -109,20 +108,6 @@ func (s *DockerAPISuite) TestExecAPIStartEnsureHeaders(c *testing.T) {
 	assert.Assert(c, resp.Header.Get("Server") != "")
 }
 
-func (s *DockerAPISuite) TestExecAPIStartBackwardsCompatible(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only supports 1.25 or later
-	runSleepingContainer(c, "-d", "--name", "test")
-	id := createExec(c, "test")
-
-	resp, body, err := request.Post(testutil.GetContext(c), fmt.Sprintf("/v1.20/exec/%s/start", id), request.RawString(`{"Detach": true}`), request.ContentType("text/plain"))
-	assert.NilError(c, err)
-
-	b, err := request.ReadBody(body)
-	comment := fmt.Sprintf("response body: %s", b)
-	assert.NilError(c, err, comment)
-	assert.Equal(c, resp.StatusCode, http.StatusOK, comment)
-}
-
 // #19362
 func (s *DockerAPISuite) TestExecAPIStartMultipleTimesError(c *testing.T) {
 	runSleepingContainer(c, "-d", "--name", "test")
@@ -140,16 +125,14 @@ func (s *DockerAPISuite) TestExecAPIStartWithDetach(c *testing.T) {
 
 	ctx := testutil.GetContext(c)
 
-	config := types.ExecConfig{
-		Cmd:          []string{"true"},
-		AttachStderr: true,
-	}
-
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	assert.NilError(c, err)
 	defer apiClient.Close()
 
-	createResp, err := apiClient.ContainerExecCreate(ctx, name, config)
+	createResp, err := apiClient.ContainerExecCreate(ctx, name, container.ExecOptions{
+		Cmd:          []string{"true"},
+		AttachStderr: true,
+	})
 	assert.NilError(c, err)
 
 	_, body, err := request.Post(ctx, fmt.Sprintf("/exec/%s/start", createResp.ID), request.RawString(`{"Detach": true}`), request.JSON)
@@ -180,7 +163,7 @@ func (s *DockerAPISuite) TestExecAPIStartValidCommand(c *testing.T) {
 	var inspectJSON struct{ ExecIDs []string }
 	inspectContainer(ctx, c, name, &inspectJSON)
 
-	assert.Assert(c, inspectJSON.ExecIDs == nil)
+	assert.Assert(c, is.Nil(inspectJSON.ExecIDs))
 }
 
 // #30311
@@ -196,7 +179,7 @@ func (s *DockerAPISuite) TestExecAPIStartInvalidCommand(c *testing.T) {
 	var inspectJSON struct{ ExecIDs []string }
 	inspectContainer(ctx, c, name, &inspectJSON)
 
-	assert.Assert(c, inspectJSON.ExecIDs == nil)
+	assert.Assert(c, is.Nil(inspectJSON.ExecIDs))
 }
 
 func (s *DockerAPISuite) TestExecStateCleanup(c *testing.T) {

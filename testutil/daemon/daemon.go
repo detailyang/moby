@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -12,10 +13,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/events"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/system"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/container"
@@ -86,6 +89,8 @@ type Daemon struct {
 	usernsRemap                string
 	rootlessUser               *user.User
 	rootlessXDGRuntimeDir      string
+	resolvConfContent          string
+	ResolvConfPathOverride     string // Path to a replacement for "/etc/resolv.conf", or empty.
 
 	// swarm related field
 	swarmListenAddr string
@@ -144,6 +149,15 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		op(d)
 	}
 
+	if len(d.resolvConfContent) > 0 {
+		path := filepath.Join(d.Folder, "resolv.conf")
+		if err := os.WriteFile(path, []byte(d.resolvConfContent), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write docker resolv.conf to %q: %v", path, err)
+		}
+		d.extraEnv = append(d.extraEnv, "DOCKER_TEST_RESOLV_CONF_PATH="+path)
+		d.ResolvConfPathOverride = path
+	}
+
 	if d.rootlessUser != nil {
 		if err := os.Chmod(SockRoot, 0o777); err != nil {
 			return nil, err
@@ -174,7 +188,9 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		if err := os.Chown(d.execRoot, uid, gid); err != nil {
 			return nil, err
 		}
-		d.rootlessXDGRuntimeDir = filepath.Join(d.Folder, "xdgrun")
+		// $XDG_RUNTIME_DIR mustn't be too long, as ${XDG_RUNTIME_DIR/dockerd-rootless
+		// contains Unix sockets
+		d.rootlessXDGRuntimeDir = filepath.Join(os.TempDir(), "xdgrun-"+id)
 		if err := os.MkdirAll(d.rootlessXDGRuntimeDir, 0o700); err != nil {
 			return nil, err
 		}
@@ -333,6 +349,17 @@ func (d *Daemon) PollCheckLogs(ctx context.Context, match func(s string) bool) p
 func ScanLogsMatchString(contains string) func(string) bool {
 	return func(line string) bool {
 		return strings.Contains(line, contains)
+	}
+}
+
+// ScanLogsMatchCount returns a function that can be used to scan the daemon logs until the passed in matcher function matches `count` times
+func ScanLogsMatchCount(f func(string) bool, count int) func(string) bool {
+	matched := 0
+	return func(line string) bool {
+		if f(line) {
+			matched++
+		}
+		return matched == count
 	}
 }
 
@@ -608,6 +635,11 @@ func (d *Daemon) Kill() error {
 		return err
 	}
 
+	_, err := d.cmd.Process.Wait()
+	if err != nil && !errors.Is(err, syscall.ECHILD) {
+		return err
+	}
+
 	if d.pidFile != "" {
 		_ = os.Remove(d.pidFile)
 	}
@@ -817,14 +849,14 @@ func (d *Daemon) LoadBusybox(ctx context.Context, t testing.TB) {
 	assert.NilError(t, err, "[%s] failed to create client", d.id)
 	defer clientHost.Close()
 
-	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"})
+	reader, err := clientHost.ImageSave(ctx, []string{"busybox:latest"}, image.SaveOptions{})
 	assert.NilError(t, err, "[%s] failed to download busybox", d.id)
 	defer reader.Close()
 
 	c := d.NewClientT(t)
 	defer c.Close()
 
-	resp, err := c.ImageLoad(ctx, reader, true)
+	resp, err := c.ImageLoad(ctx, reader, image.LoadOptions{Quiet: true})
 	assert.NilError(t, err, "[%s] failed to load busybox", d.id)
 	defer resp.Body.Close()
 }

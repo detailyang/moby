@@ -15,11 +15,17 @@ import (
 
 	"github.com/cpuguy83/tar2go"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/versions"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration/internal/build"
 	"github.com/docker/docker/integration/internal/container"
+	"github.com/docker/docker/internal/testutils"
+	"github.com/docker/docker/internal/testutils/specialimage"
 	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/testutil/fakecontext"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/assert/cmp"
 	is "gotest.tools/v3/assert/cmp"
@@ -50,16 +56,16 @@ func tarIndexFS(t *testing.T, rdr io.Reader) fs.FS {
 }
 
 func TestSaveCheckTimes(t *testing.T) {
-	t.Parallel()
-
 	ctx := setupTest(t)
+
+	t.Parallel()
 	client := testEnv.APIClient()
 
 	const repoName = "busybox:latest"
 	img, _, err := client.ImageInspectWithRaw(ctx, repoName)
 	assert.NilError(t, err)
 
-	rdr, err := client.ImageSave(ctx, []string{repoName})
+	rdr, err := client.ImageSave(ctx, []string{repoName}, image.SaveOptions{})
 	assert.NilError(t, err)
 
 	tarfs := tarIndexFS(t, rdr)
@@ -83,6 +89,149 @@ func TestSaveCheckTimes(t *testing.T) {
 	} else {
 		assert.Check(t, is.Equal(info.ModTime().Format(time.RFC3339), created.Format(time.RFC3339)))
 	}
+}
+
+// Regression test for https://github.com/moby/moby/issues/47065
+func TestSaveOCI(t *testing.T) {
+	skip.If(t, versions.LessThan(testEnv.DaemonAPIVersion(), "1.44"), "OCI layout support was introduced in v25")
+
+	ctx := setupTest(t)
+	client := testEnv.APIClient()
+
+	const busybox = "busybox:latest"
+	inspectBusybox, _, err := client.ImageInspectWithRaw(ctx, busybox)
+	assert.NilError(t, err)
+
+	type testCase struct {
+		image                 string
+		expectedOCIRef        string
+		expectedContainerdRef string
+	}
+
+	testCases := []testCase{
+		// Busybox by tagged name
+		{image: busybox, expectedContainerdRef: "docker.io/library/busybox:latest", expectedOCIRef: "latest"},
+
+		// Busybox by ID
+		{image: inspectBusybox.ID},
+	}
+
+	if testEnv.DaemonInfo.OSType != "windows" {
+		multiLayerImage := specialimage.Load(ctx, t, client, specialimage.MultiLayer)
+		// Multi-layer image
+		testCases = append(testCases, testCase{image: multiLayerImage, expectedContainerdRef: "docker.io/library/multilayer:latest", expectedOCIRef: "latest"})
+
+	}
+
+	// Busybox frozen image will have empty RepoDigests when loaded into the
+	// graphdriver image store so we can't use it.
+	// This will work with the containerd image store though.
+	if len(inspectBusybox.RepoDigests) > 0 {
+		// Digested reference
+		testCases = append(testCases, testCase{
+			image: inspectBusybox.RepoDigests[0],
+		})
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.image, func(t *testing.T) {
+			// Get information about the original image.
+			inspect, _, err := client.ImageInspectWithRaw(ctx, tc.image)
+			assert.NilError(t, err)
+
+			rdr, err := client.ImageSave(ctx, []string{tc.image}, image.SaveOptions{})
+			assert.NilError(t, err)
+			defer rdr.Close()
+
+			tarfs := tarIndexFS(t, rdr)
+
+			indexData, err := fs.ReadFile(tarfs, "index.json")
+			assert.NilError(t, err, "failed to read index.json")
+
+			var index ocispec.Index
+			assert.NilError(t, json.Unmarshal(indexData, &index), "failed to unmarshal index.json")
+
+			// All test images are single-platform, so they should have only one manifest.
+			assert.Assert(t, is.Len(index.Manifests, 1))
+
+			manifestData, err := fs.ReadFile(tarfs, "blobs/sha256/"+index.Manifests[0].Digest.Encoded())
+			assert.NilError(t, err)
+
+			var manifest ocispec.Manifest
+			assert.NilError(t, json.Unmarshal(manifestData, &manifest))
+
+			t.Run("Manifest", func(t *testing.T) {
+				assert.Check(t, is.Len(manifest.Layers, len(inspect.RootFS.Layers)))
+
+				var digests []string
+				// Check if layers referenced by the manifest exist in the archive
+				// and match the layers from the original image.
+				for _, l := range manifest.Layers {
+					layerPath := "blobs/sha256/" + l.Digest.Encoded()
+					stat, err := fs.Stat(tarfs, layerPath)
+					assert.NilError(t, err)
+
+					assert.Check(t, is.Equal(l.Size, stat.Size()))
+
+					f, err := tarfs.Open(layerPath)
+					assert.NilError(t, err)
+
+					layerDigest, err := testutils.UncompressedTarDigest(f)
+					f.Close()
+
+					assert.NilError(t, err)
+
+					digests = append(digests, layerDigest.String())
+				}
+
+				assert.Check(t, is.DeepEqual(digests, inspect.RootFS.Layers))
+			})
+
+			t.Run("Config", func(t *testing.T) {
+				configData, err := fs.ReadFile(tarfs, "blobs/sha256/"+manifest.Config.Digest.Encoded())
+				assert.NilError(t, err)
+
+				var config ocispec.Image
+				assert.NilError(t, json.Unmarshal(configData, &config))
+
+				var diffIDs []string
+				for _, l := range config.RootFS.DiffIDs {
+					diffIDs = append(diffIDs, l.String())
+				}
+
+				assert.Check(t, is.DeepEqual(diffIDs, inspect.RootFS.Layers))
+			})
+
+			t.Run("Containerd image name", func(t *testing.T) {
+				assert.Check(t, is.Equal(index.Manifests[0].Annotations["io.containerd.image.name"], tc.expectedContainerdRef))
+			})
+
+			t.Run("OCI reference tag", func(t *testing.T) {
+				assert.Check(t, is.Equal(index.Manifests[0].Annotations["org.opencontainers.image.ref.name"], tc.expectedOCIRef))
+			})
+		})
+	}
+}
+
+// TODO(thaJeztah): this test currently only checks invalid cases; update this test to use a table-test and test both valid and invalid platform options.
+func TestSavePlatform(t *testing.T) {
+	ctx := setupTest(t)
+
+	t.Parallel()
+	client := testEnv.APIClient()
+
+	const repoName = "busybox:latest"
+	_, _, err := client.ImageInspectWithRaw(ctx, repoName)
+	assert.NilError(t, err)
+
+	_, err = client.ImageSave(ctx, []string{repoName}, image.SaveOptions{
+		Platforms: []ocispec.Platform{
+			{Architecture: "amd64", OS: "linux"},
+			{Architecture: "arm64", OS: "linux", Variant: "v8"},
+		},
+	})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.Error(err, "Error response from daemon: multiple platform parameters not supported"))
 }
 
 func TestSaveRepoWithMultipleImages(t *testing.T) {
@@ -115,7 +264,7 @@ func TestSaveRepoWithMultipleImages(t *testing.T) {
 	idBar := makeImage("busybox:latest", tagBar)
 	idBusybox := busyboxImg.ID
 
-	rdr, err := client.ImageSave(ctx, []string{repoName, "busybox:latest"})
+	rdr, err := client.ImageSave(ctx, []string{repoName, "busybox:latest"}, image.SaveOptions{})
 	assert.NilError(t, err)
 	defer rdr.Close()
 
@@ -172,7 +321,7 @@ RUN touch /opt/a/b/c && chown user:user /opt/a/b/c`
 
 	imgID := build.Do(ctx, t, client, fakecontext.New(t, t.TempDir(), fakecontext.WithDockerfile(dockerfile)))
 
-	rdr, err := client.ImageSave(ctx, []string{imgID})
+	rdr, err := client.ImageSave(ctx, []string{imgID}, image.SaveOptions{})
 	assert.NilError(t, err)
 	defer rdr.Close()
 
