@@ -58,87 +58,6 @@ func TestAdjustSharedNamespaceContainerName(t *testing.T) {
 }
 
 // Unix test as uses settings which are not available on Windows
-func TestAdjustCPUShares(t *testing.T) {
-	tmp, err := os.MkdirTemp("", "docker-daemon-unix-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmp)
-	daemon := &Daemon{
-		repository: tmp,
-		root:       tmp,
-	}
-	cfg := &config.Config{}
-	muteLogs(t)
-
-	hostConfig := &containertypes.HostConfig{
-		Resources: containertypes.Resources{CPUShares: linuxMinCPUShares - 1},
-	}
-	daemon.adaptContainerSettings(cfg, hostConfig, true)
-	if hostConfig.CPUShares != linuxMinCPUShares {
-		t.Errorf("Expected CPUShares to be %d", linuxMinCPUShares)
-	}
-
-	hostConfig.CPUShares = linuxMaxCPUShares + 1
-	daemon.adaptContainerSettings(cfg, hostConfig, true)
-	if hostConfig.CPUShares != linuxMaxCPUShares {
-		t.Errorf("Expected CPUShares to be %d", linuxMaxCPUShares)
-	}
-
-	hostConfig.CPUShares = 0
-	daemon.adaptContainerSettings(cfg, hostConfig, true)
-	if hostConfig.CPUShares != 0 {
-		t.Error("Expected CPUShares to be unchanged")
-	}
-
-	hostConfig.CPUShares = 1024
-	daemon.adaptContainerSettings(cfg, hostConfig, true)
-	if hostConfig.CPUShares != 1024 {
-		t.Error("Expected CPUShares to be unchanged")
-	}
-}
-
-// Unix test as uses settings which are not available on Windows
-func TestAdjustCPUSharesNoAdjustment(t *testing.T) {
-	tmp, err := os.MkdirTemp("", "docker-daemon-unix-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmp)
-	daemon := &Daemon{
-		repository: tmp,
-		root:       tmp,
-	}
-	cfg := &config.Config{}
-
-	hostConfig := &containertypes.HostConfig{
-		Resources: containertypes.Resources{CPUShares: linuxMinCPUShares - 1},
-	}
-	daemon.adaptContainerSettings(cfg, hostConfig, false)
-	if hostConfig.CPUShares != linuxMinCPUShares-1 {
-		t.Errorf("Expected CPUShares to be %d", linuxMinCPUShares-1)
-	}
-
-	hostConfig.CPUShares = linuxMaxCPUShares + 1
-	daemon.adaptContainerSettings(cfg, hostConfig, false)
-	if hostConfig.CPUShares != linuxMaxCPUShares+1 {
-		t.Errorf("Expected CPUShares to be %d", linuxMaxCPUShares+1)
-	}
-
-	hostConfig.CPUShares = 0
-	daemon.adaptContainerSettings(cfg, hostConfig, false)
-	if hostConfig.CPUShares != 0 {
-		t.Error("Expected CPUShares to be unchanged")
-	}
-
-	hostConfig.CPUShares = 1024
-	daemon.adaptContainerSettings(cfg, hostConfig, false)
-	if hostConfig.CPUShares != 1024 {
-		t.Error("Expected CPUShares to be unchanged")
-	}
-}
-
-// Unix test as uses settings which are not available on Windows
 func TestParseSecurityOptWithDeprecatedColon(t *testing.T) {
 	opts := &container.SecurityOptions{}
 	cfg := &containertypes.HostConfig{}
@@ -241,6 +160,13 @@ func TestParseSecurityOpt(t *testing.T) {
 			SecurityOpt: []string{"unknown=something"},
 		})
 		assert.Error(t, err, `invalid --security-opt 2: "unknown=something"`)
+	})
+	t.Run("invalid cgroup option", func(t *testing.T) {
+		secOpts := &container.SecurityOptions{}
+		err := parseSecurityOpt(secOpts, &containertypes.HostConfig{
+			SecurityOpt: []string{"writable-cgroups=dang"},
+		})
+		assert.Error(t, err, `invalid --security-opt 2: "writable-cgroups=dang"`)
 	})
 }
 
@@ -355,7 +281,6 @@ func TestVerifyPlatformContainerResources(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			warnings, err := verifyPlatformContainerResources(&tc.resources, &tc.sysInfo, tc.update)

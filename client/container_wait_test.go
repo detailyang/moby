@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
-	"github.com/pkg/errors"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -31,6 +31,23 @@ func TestContainerWaitError(t *testing.T) {
 		t.Fatalf("expected to not get a wait result, got %d", result.StatusCode)
 	case err := <-errC:
 		assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+	}
+}
+
+// TestContainerWaitConnectionError verifies that connection errors occurring
+// during API-version negotiation are not shadowed by API-version errors.
+//
+// Regression test for https://github.com/docker/cli/issues/4890
+func TestContainerWaitConnectionError(t *testing.T) {
+	client, err := NewClientWithOpts(WithAPIVersionNegotiation(), WithHost("tcp://no-such-host.invalid"))
+	assert.NilError(t, err)
+
+	resultC, errC := client.ContainerWait(context.Background(), "nothing", "")
+	select {
+	case result := <-resultC:
+		t.Fatalf("expected to not get a wait result, got %d", result.StatusCode)
+	case err := <-errC:
+		assert.Check(t, is.ErrorType(err, IsErrConnectionFailed))
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/moby/sys/mountinfo"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/icmd"
 	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
@@ -145,19 +146,19 @@ func (s *DockerCLIRunSuite) TestRunDetachedContainerIDPrinting(c *testing.T) {
 // the working directory should be set correctly
 func (s *DockerCLIRunSuite) TestRunWorkingDirectory(c *testing.T) {
 	dir := "/root"
-	image := "busybox"
+	const imgName = "busybox"
 	if testEnv.DaemonInfo.OSType == "windows" {
 		dir = `C:/Windows`
 	}
 
 	// First with -w
-	out := cli.DockerCmd(c, "run", "-w", dir, image, "pwd").Stdout()
+	out := cli.DockerCmd(c, "run", "-w", dir, imgName, "pwd").Stdout()
 	if strings.TrimSpace(out) != dir {
 		c.Errorf("-w failed to set working directory")
 	}
 
 	// Then with --workdir
-	out = cli.DockerCmd(c, "run", "--workdir", dir, image, "pwd").Stdout()
+	out = cli.DockerCmd(c, "run", "--workdir", dir, imgName, "pwd").Stdout()
 	if strings.TrimSpace(out) != dir {
 		c.Errorf("--workdir failed to set working directory")
 	}
@@ -166,14 +167,14 @@ func (s *DockerCLIRunSuite) TestRunWorkingDirectory(c *testing.T) {
 // pinging Google's DNS resolver should fail when we disable the networking
 func (s *DockerCLIRunSuite) TestRunWithoutNetworking(c *testing.T) {
 	count := "-c"
-	image := "busybox"
+	imgName := "busybox"
 	if testEnv.DaemonInfo.OSType == "windows" {
 		count = "-n"
-		image = testEnv.PlatformDefaults.BaseImage
+		imgName = testEnv.PlatformDefaults.BaseImage
 	}
 
 	// First using the long form --net
-	out, exitCode, err := dockerCmdWithError("run", "--net=none", image, "ping", count, "1", "8.8.8.8")
+	out, exitCode, err := dockerCmdWithError("run", "--net=none", imgName, "ping", count, "1", "8.8.8.8")
 	if err != nil && exitCode != 1 {
 		c.Fatal(out, err)
 	}
@@ -291,7 +292,7 @@ func (s *DockerCLIRunSuite) TestRunWithNetAliasOnDefaultNetworks(c *testing.T) {
 	for _, nw := range defaults {
 		out, _, err := dockerCmdWithError("run", "-d", "--net", nw, "--net-alias", "alias_"+nw, "busybox", "top")
 		assert.ErrorContains(c, err, "")
-		assert.Assert(c, strings.Contains(out, runconfig.ErrUnsupportedNetworkAndAlias.Error()))
+		assert.Assert(c, is.Contains(out, runconfig.ErrUnsupportedNetworkAndAlias.Error()))
 	}
 }
 
@@ -305,14 +306,14 @@ func (s *DockerCLIRunSuite) TestUserDefinedNetworkAlias(c *testing.T) {
 	// Check if default short-id alias is added automatically
 	id := strings.TrimSpace(cid1)
 	aliases := inspectField(c, id, "NetworkSettings.Networks.net1.Aliases")
-	assert.Assert(c, strings.Contains(aliases, stringid.TruncateID(id)))
+	assert.Assert(c, is.Contains(aliases, stringid.TruncateID(id)))
 	cid2 := cli.DockerCmd(c, "run", "-d", "--net=net1", "--name=second", "busybox:glibc", "top").Stdout()
 	cli.WaitRun(c, "second")
 
 	// Check if default short-id alias is added automatically
 	id = strings.TrimSpace(cid2)
 	aliases = inspectField(c, id, "NetworkSettings.Networks.net1.Aliases")
-	assert.Assert(c, strings.Contains(aliases, stringid.TruncateID(id)))
+	assert.Assert(c, is.Contains(aliases, stringid.TruncateID(id)))
 	// ping to first and its network-scoped aliases
 	_, _, err := dockerCmdWithError("exec", "second", "ping", "-c", "1", "first")
 	assert.NilError(c, err)
@@ -344,7 +345,7 @@ func (s *DockerCLIRunSuite) TestUserDefinedNetworkAlias(c *testing.T) {
 func (s *DockerCLIRunSuite) TestRunWithDaemonFlags(c *testing.T) {
 	out, _, err := dockerCmdWithError("--exec-opt", "foo=bar", "run", "-i", "busybox", "true")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, "unknown flag: --exec-opt"))
+	assert.Assert(c, is.Contains(out, "unknown flag: --exec-opt"))
 }
 
 // Regression test for #4979
@@ -398,7 +399,7 @@ func (s *DockerCLIRunSuite) TestRunCreateVolumesInSymlinkDir(c *testing.T) {
 		c.Skip("Requires TEMP to point to C: drive")
 	}
 
-	f, err := os.OpenFile(filepath.Join(dir, "test"), os.O_CREATE, 0o700)
+	f, err := os.OpenFile(filepath.Join(dir, "test"), os.O_CREATE, 0o600)
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -503,7 +504,7 @@ func (s *DockerCLIRunSuite) TestVolumesFromGetsProperMode(c *testing.T) {
 
 	cli.DockerCmd(c, "run", "--name", "parent", "-v", hostpath+":"+prefix+slash+"test:ro", "busybox", "true")
 
-	// Expect this "rw" mode to be be ignored since the inherited volume is "ro"
+	// Expect this "rw" mode to be ignored since the inherited volume is "ro"
 	if _, _, err := dockerCmdWithError("run", "--volumes-from", "parent:rw", "busybox", "touch", prefix+slash+"test"+slash+"file"); err == nil {
 		c.Fatal("Expected volumes-from to inherit read-only volume even when passing in `rw`")
 	}
@@ -623,18 +624,18 @@ func (s *DockerCLIRunSuite) TestRunCreateVolumeWithSymlink(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	workingDirectory, err := os.MkdirTemp("", "TestRunCreateVolumeWithSymlink")
 	assert.NilError(c, err)
-	image := "docker-test-createvolumewithsymlink"
+	const imgName = "docker-test-createvolumewithsymlink"
 
-	buildCmd := exec.Command(dockerBinary, "build", "-t", image, "-")
+	buildCmd := exec.Command(dockerBinary, "build", "-t", imgName, "-")
 	buildCmd.Stdin = strings.NewReader(`FROM busybox
 		RUN ln -s home /bar`)
 	buildCmd.Dir = workingDirectory
 	err = buildCmd.Run()
 	if err != nil {
-		c.Fatalf("could not build '%s': %v", image, err)
+		c.Fatalf("could not build '%s': %v", imgName, err)
 	}
 
-	_, exitCode, err := dockerCmdWithError("run", "-v", "/bar/foo", "--name", "test-createvolumewithsymlink", image, "sh", "-c", "mount | grep -q /home/foo")
+	_, exitCode, err := dockerCmdWithError("run", "-v", "/bar/foo", "--name", "test-createvolumewithsymlink", imgName, "sh", "-c", "mount | grep -q /home/foo")
 	if err != nil || exitCode != 0 {
 		c.Fatalf("[run] err: %v, exitcode: %d", err, exitCode)
 	}
@@ -1275,10 +1276,11 @@ func (s *DockerCLIRunSuite) TestRunDNSDefaultOptions(c *testing.T) {
 	}
 
 	actual := cli.DockerCmd(c, "run", "busybox", "cat", "/etc/resolv.conf").Combined()
-	// check that the actual defaults are appended to the commented out
-	// localhost resolver (which should be preserved)
+	actual = regexp.MustCompile("(?m)^#.*$").ReplaceAllString(actual, "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
 	// NOTE: if we ever change the defaults from google dns, this will break
-	expected := "#nameserver 127.0.2.1\n\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n"
+	expected := "nameserver 8.8.8.8 nameserver 8.8.4.4"
+
 	if actual != expected {
 		c.Fatalf("expected resolv.conf be: %q, but was: %q", expected, actual)
 	}
@@ -1295,14 +1297,16 @@ func (s *DockerCLIRunSuite) TestRunDNSOptions(c *testing.T) {
 		c.Fatalf("Expected warning on stderr about localhost resolver, but got %q", result.Stderr())
 	}
 
-	actual := strings.ReplaceAll(strings.Trim(result.Stdout(), "\r\n"), "\n", " ")
-	if actual != "search mydomain nameserver 127.0.0.1 options ndots:9" {
-		c.Fatalf("expected 'search mydomain nameserver 127.0.0.1 options ndots:9', but says: %q", actual)
+	actual := regexp.MustCompile("(?m)^#.*$").ReplaceAllString(result.Stdout(), "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
+	if actual != "nameserver 127.0.0.1 search mydomain options ndots:9" {
+		c.Fatalf("nameserver 127.0.0.1 expected 'search mydomain options ndots:9', but says: %q", actual)
 	}
 
 	out := cli.DockerCmd(c, "run", "--dns=1.1.1.1", "--dns-search=.", "--dns-opt=ndots:3", "busybox", "cat", "/etc/resolv.conf").Combined()
 
-	actual = strings.ReplaceAll(strings.Trim(strings.Trim(out, "\r\n"), " "), "\n", " ")
+	actual = regexp.MustCompile("(?m)^#.*$").ReplaceAllString(out, "")
+	actual = strings.ReplaceAll(strings.Trim(strings.Trim(actual, "\r\n"), " "), "\n", " ")
 	if actual != "nameserver 1.1.1.1 options ndots:3" {
 		c.Fatalf("expected 'nameserver 1.1.1.1 options ndots:3', but says: %q", actual)
 	}
@@ -1312,9 +1316,10 @@ func (s *DockerCLIRunSuite) TestRunDNSRepeatOptions(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	out := cli.DockerCmd(c, "run", "--dns=1.1.1.1", "--dns=2.2.2.2", "--dns-search=mydomain", "--dns-search=mydomain2", "--dns-opt=ndots:9", "--dns-opt=timeout:3", "busybox", "cat", "/etc/resolv.conf").Stdout()
 
-	actual := strings.ReplaceAll(strings.Trim(out, "\r\n"), "\n", " ")
-	if actual != "search mydomain mydomain2 nameserver 1.1.1.1 nameserver 2.2.2.2 options ndots:9 timeout:3" {
-		c.Fatalf("expected 'search mydomain mydomain2 nameserver 1.1.1.1 nameserver 2.2.2.2 options ndots:9 timeout:3', but says: %q", actual)
+	actual := regexp.MustCompile("(?m)^#.*$").ReplaceAllString(out, "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
+	if actual != "nameserver 1.1.1.1 nameserver 2.2.2.2 search mydomain mydomain2 options ndots:9 timeout:3" {
+		c.Fatalf("expected 'nameserver 1.1.1.1 nameserver 2.2.2.2 search mydomain mydomain2 options ndots:9 timeout:3', but says: %q", actual)
 	}
 }
 
@@ -1436,7 +1441,7 @@ func (s *DockerCLIRunSuite) TestRunResolvconfUpdate(c *testing.T) {
 	}
 
 	// This test case is meant to test monitoring resolv.conf when it is
-	// a regular file not a bind mounc. So we unmount resolv.conf and replace
+	// a regular file not a bind mount. So we unmount resolv.conf and replace
 	// it with a file containing the original settings.
 	mounted, err := mountinfo.Mounted("/etc/resolv.conf")
 	if err != nil {
@@ -1934,9 +1939,9 @@ func (s *DockerCLIRunSuite) TestRunCidFileCleanupIfEmpty(c *testing.T) {
 	tmpCidFile := path.Join(tmpDir, "cid")
 
 	// This must be an image that has no CMD or ENTRYPOINT set
-	image := loadSpecialImage(c, specialimage.EmptyFS)
+	imgRef := loadSpecialImage(c, specialimage.EmptyFS)
 
-	out, _, err := dockerCmdWithError("run", "--cidfile", tmpCidFile, image)
+	out, _, err := dockerCmdWithError("run", "--cidfile", tmpCidFile, imgRef)
 	if err == nil {
 		c.Fatalf("Run without command must fail. out=%s", out)
 	} else if !strings.Contains(out, "no command specified") {
@@ -2085,7 +2090,7 @@ func (s *DockerCLIRunSuite) TestRunMountOrdering(c *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir2)
 
-	// Create a temporary tmpfs mounc.
+	// Create a temporary tmpfs mount.
 	fooDir := filepath.Join(tmpDir, "foo")
 	if err := os.MkdirAll(filepath.Join(tmpDir, "foo"), 0o755); err != nil {
 		c.Fatalf("failed to mkdir at %s - %s", fooDir, err)
@@ -2278,7 +2283,7 @@ func (s *DockerCLIRunSuite) TestRunAllowPortRangeThroughExpose(c *testing.T) {
 func (s *DockerCLIRunSuite) TestRunExposePort(c *testing.T) {
 	out, _, err := dockerCmdWithError("run", "--expose", "80000", "busybox")
 	assert.Assert(c, err != nil, "--expose with an invalid port should error out")
-	assert.Assert(c, strings.Contains(out, "invalid range format for --expose"))
+	assert.Assert(c, is.Contains(out, "invalid range format for --expose"))
 }
 
 func (s *DockerCLIRunSuite) TestRunModeIpcHost(c *testing.T) {
@@ -2439,7 +2444,7 @@ func (s *DockerCLIRunSuite) TestRunModeUTSHost(c *testing.T) {
 	}
 
 	out = dockerCmdWithFail(c, "run", "-h=name", "--uts=host", "busybox", "ps")
-	assert.Assert(c, strings.Contains(out, runconfig.ErrConflictUTSHostname.Error()))
+	assert.Assert(c, is.Contains(out, runconfig.ErrConflictUTSHostname.Error()))
 }
 
 func (s *DockerCLIRunSuite) TestRunTLSVerify(c *testing.T) {
@@ -2679,7 +2684,7 @@ func testReadOnlyFile(c *testing.T, testPriv bool, filenames ...string) {
 
 	for _, f := range filenames {
 		expected := "touch: " + f + ": Read-only file system"
-		assert.Assert(c, strings.Contains(out, expected))
+		assert.Assert(c, is.Contains(out, expected))
 	}
 
 	if !testPriv {
@@ -2691,7 +2696,7 @@ func testReadOnlyFile(c *testing.T, testPriv bool, filenames ...string) {
 
 	for _, f := range filenames {
 		expected := "touch: " + f + ": Read-only file system"
-		assert.Assert(c, strings.Contains(out, expected))
+		assert.Assert(c, is.Contains(out, expected))
 	}
 }
 
@@ -3042,7 +3047,7 @@ func (s *DockerCLIRunSuite) TestRunNetworkFilesBindMount(c *testing.T) {
 	filename := createTmpFile(c, expected)
 	defer os.Remove(filename)
 
-	// for user namespaced test runs, the temp file must be accessible to unprivileged root
+	// #nosec G302 -- for user namespaced test runs, the temp file must be accessible to unprivileged root
 	if err := os.Chmod(filename, 0o646); err != nil {
 		c.Fatalf("error modifying permissions of %s: %v", filename, err)
 	}
@@ -3064,7 +3069,7 @@ func (s *DockerCLIRunSuite) TestRunNetworkFilesBindMountRO(c *testing.T) {
 	filename := createTmpFile(c, "test123")
 	defer os.Remove(filename)
 
-	// for user namespaced test runs, the temp file must be accessible to unprivileged root
+	// #nosec G302 -- for user namespaced test runs, the temp file must be accessible to unprivileged root
 	if err := os.Chmod(filename, 0o646); err != nil {
 		c.Fatalf("error modifying permissions of %s: %v", filename, err)
 	}
@@ -3086,7 +3091,7 @@ func (s *DockerCLIRunSuite) TestRunNetworkFilesBindMountROFilesystem(c *testing.
 	filename := createTmpFile(c, "test123")
 	defer os.Remove(filename)
 
-	// for user namespaced test runs, the temp file must be accessible to unprivileged root
+	// #nosec G302 -- for user namespaced test runs, the temp file must be accessible to unprivileged root
 	if err := os.Chmod(filename, 0o646); err != nil {
 		c.Fatalf("error modifying permissions of %s: %v", filename, err)
 	}
@@ -3550,7 +3555,7 @@ func (s *DockerCLIRunSuite) TestContainerWithConflictingSharedNetwork(c *testing
 	// Connecting to the user defined network must fail
 	out, _, err := dockerCmdWithError("network", "connect", "testnetwork1", "second")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, runconfig.ErrConflictSharedNetwork.Error()))
+	assert.Assert(c, is.Contains(out, runconfig.ErrConflictSharedNetwork.Error()))
 }
 
 func (s *DockerCLIRunSuite) TestContainerWithConflictingNoneNetwork(c *testing.T) {
@@ -3564,7 +3569,7 @@ func (s *DockerCLIRunSuite) TestContainerWithConflictingNoneNetwork(c *testing.T
 	// Connecting to the user defined network must fail
 	out, _, err := dockerCmdWithError("network", "connect", "testnetwork1", "first")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, runconfig.ErrConflictNoNetwork.Error()))
+	assert.Assert(c, is.Contains(out, runconfig.ErrConflictNoNetwork.Error()))
 	// create a container connected to testnetwork1
 	cli.DockerCmd(c, "run", "-d", "--net=testnetwork1", "--name=second", "busybox", "top")
 	cli.WaitRun(c, "second")
@@ -3583,7 +3588,7 @@ func (s *DockerCLIRunSuite) TestRunStdinBlockedAfterContainerExit(c *testing.T) 
 	stdout := bytes.NewBuffer(nil)
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout
-	assert.Assert(c, cmd.Start() == nil)
+	assert.NilError(c, cmd.Start())
 
 	waitChan := make(chan error, 1)
 	go func() {
@@ -3733,7 +3738,7 @@ func (s *DockerCLIRunSuite) TestRunNamedVolumesMountedAsShared(c *testing.T) {
 	testRequires(c, DaemonIsLinux, NotUserNamespace)
 	out, exitCode, _ := dockerCmdWithError("run", "-v", "foo:/test:shared", "busybox", "touch", "/test/somefile")
 	assert.Assert(c, exitCode != 0)
-	assert.Assert(c, strings.Contains(out, "invalid mount config"))
+	assert.Assert(c, is.Contains(out, "invalid mount config"))
 }
 
 func (s *DockerCLIRunSuite) TestRunNamedVolumeCopyImageData(c *testing.T) {
@@ -3758,13 +3763,13 @@ func (s *DockerCLIRunSuite) TestRunNamedVolumeNotRemoved(c *testing.T) {
 	cli.DockerCmd(c, "run", "--rm", "-v", "test:"+prefix+"/foo", "-v", prefix+"/bar", "busybox", "true")
 	cli.DockerCmd(c, "volume", "inspect", "test")
 	out := cli.DockerCmd(c, "volume", "ls", "-q").Combined()
-	assert.Assert(c, strings.Contains(out, "test"))
+	assert.Assert(c, is.Contains(out, "test"))
 
 	cli.DockerCmd(c, "run", "--name=test", "-v", "test:"+prefix+"/foo", "-v", prefix+"/bar", "busybox", "true")
 	cli.DockerCmd(c, "rm", "-fv", "test")
 	cli.DockerCmd(c, "volume", "inspect", "test")
 	out = cli.DockerCmd(c, "volume", "ls", "-q").Combined()
-	assert.Assert(c, strings.Contains(out, "test"))
+	assert.Assert(c, is.Contains(out, "test"))
 }
 
 func (s *DockerCLIRunSuite) TestRunNamedVolumesFromNotRemoved(c *testing.T) {
@@ -3794,7 +3799,7 @@ func (s *DockerCLIRunSuite) TestRunNamedVolumesFromNotRemoved(c *testing.T) {
 	cli.DockerCmd(c, "rm", "-fv", "child")
 	cli.DockerCmd(c, "volume", "inspect", "test")
 	out := cli.DockerCmd(c, "volume", "ls", "-q").Combined()
-	assert.Assert(c, strings.Contains(out, "test"))
+	assert.Assert(c, is.Contains(out, "test"))
 	assert.Assert(c, !strings.Contains(strings.TrimSpace(out), vname))
 }
 
@@ -3818,7 +3823,7 @@ func (s *DockerCLIRunSuite) TestRunAttachFailedNoLeak(c *testing.T) {
 
 	client := d.NewClientT(c)
 
-	nroutines := waitForStableGourtineCount(ctx, c, client)
+	nroutines := waitForStableGoroutineCount(ctx, c, client)
 
 	out, err := d.Cmd(append([]string{"run", "-d", "--name=test", "-p", "8000:8000", "busybox"}, sleepCommandForDaemonPlatform()...)...)
 	assert.NilError(c, err, out)
@@ -4014,7 +4019,7 @@ func (s *DockerDaemonSuite) TestRunWithUlimitAndDaemonDefault(c *testing.T) {
 
 	out, err := d.Cmd("inspect", "--format", "{{.HostConfig.Ulimits}}", name)
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(out, "[nofile=65535:65535]"))
+	assert.Assert(c, is.Contains(out, "[nofile=65535:65535]"))
 	name = "test-B"
 	_, err = d.Cmd("run", "--name", name, "--ulimit=nofile=42", "-d", "busybox", "top")
 	assert.NilError(c, err)
@@ -4022,7 +4027,7 @@ func (s *DockerDaemonSuite) TestRunWithUlimitAndDaemonDefault(c *testing.T) {
 
 	out, err = d.Cmd("inspect", "--format", "{{.HostConfig.Ulimits}}", name)
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(out, "[nofile=42:42]"))
+	assert.Assert(c, is.Contains(out, "[nofile=42:42]"))
 }
 
 func (s *DockerCLIRunSuite) TestRunStoppedLoggingDriverNoLeak(c *testing.T) {
@@ -4071,8 +4076,8 @@ func (s *DockerCLIRunSuite) TestRunCredentialSpecWellFormed(c *testing.T) {
 		// controller handy
 		out := cli.DockerCmd(c, "run", "--rm", "--security-opt=credentialspec="+value, minimalBaseImage(), "nltest", "/PARENTDOMAIN").Combined()
 
-		assert.Assert(c, strings.Contains(out, "hyperv.local."))
-		assert.Assert(c, strings.Contains(out, "The command completed successfully"))
+		assert.Assert(c, is.Contains(out, "hyperv.local."))
+		assert.Assert(c, is.Contains(out, "The command completed successfully"))
 	}
 }
 
@@ -4083,17 +4088,17 @@ func (s *DockerCLIRunSuite) TestRunDuplicateMount(c *testing.T) {
 	assert.NilError(c, err)
 	defer tmpFile.Close()
 
-	data := "touch-me-foo-bar\n"
-	if _, err := tmpFile.Write([]byte(data)); err != nil {
+	const data = "touch-me-foo-bar\n"
+	if _, err := tmpFile.WriteString(data); err != nil {
 		c.Fatal(err)
 	}
 
 	name := "test"
 	out := cli.DockerCmd(c, "run", "--name", name, "-v", "/tmp:/tmp", "-v", "/tmp:/tmp", "busybox", "sh", "-c", "cat "+tmpFile.Name()+" && ls /").Combined()
 	assert.Assert(c, !strings.Contains(out, "tmp:"))
-	assert.Assert(c, strings.Contains(out, data))
+	assert.Assert(c, is.Contains(out, data))
 	out = inspectFieldJSON(c, name, "Config.Volumes")
-	assert.Assert(c, strings.Contains(out, "null"))
+	assert.Assert(c, is.Contains(out, "null"))
 }
 
 func (s *DockerCLIRunSuite) TestRunWindowsWithCPUCount(c *testing.T) {
@@ -4130,9 +4135,9 @@ func (s *DockerCLIRunSuite) TestRunProcessIsolationWithCPUCountCPUSharesAndCPUPe
 	testRequires(c, DaemonIsWindows, testEnv.DaemonInfo.Isolation.IsProcess)
 
 	out := cli.DockerCmd(c, "run", "--cpu-count=1", "--cpu-shares=1000", "--cpu-percent=80", "--name", "test", "busybox", "echo", "testing").Combined()
-	assert.Assert(c, strings.Contains(strings.TrimSpace(out), "WARNING: Conflicting options: CPU count takes priority over CPU shares on Windows Server Containers. CPU shares discarded"))
-	assert.Assert(c, strings.Contains(strings.TrimSpace(out), "WARNING: Conflicting options: CPU count takes priority over CPU percent on Windows Server Containers. CPU percent discarded"))
-	assert.Assert(c, strings.Contains(strings.TrimSpace(out), "testing"))
+	assert.Assert(c, is.Contains(strings.TrimSpace(out), "WARNING: Conflicting options: CPU count takes priority over CPU shares on Windows Server Containers. CPU shares discarded"))
+	assert.Assert(c, is.Contains(strings.TrimSpace(out), "WARNING: Conflicting options: CPU count takes priority over CPU percent on Windows Server Containers. CPU percent discarded"))
+	assert.Assert(c, is.Contains(strings.TrimSpace(out), "testing"))
 	out = inspectField(c, "test", "HostConfig.CPUCount")
 	assert.Equal(c, out, "1")
 
@@ -4147,7 +4152,7 @@ func (s *DockerCLIRunSuite) TestRunHypervIsolationWithCPUCountCPUSharesAndCPUPer
 	testRequires(c, DaemonIsWindows, testEnv.DaemonInfo.Isolation.IsHyperV)
 
 	out := cli.DockerCmd(c, "run", "--cpu-count=1", "--cpu-shares=1000", "--cpu-percent=80", "--name", "test", "busybox", "echo", "testing").Combined()
-	assert.Assert(c, strings.Contains(strings.TrimSpace(out), "testing"))
+	assert.Assert(c, is.Contains(strings.TrimSpace(out), "testing"))
 	out = inspectField(c, "test", "HostConfig.CPUCount")
 	assert.Equal(c, out, "1")
 
@@ -4166,15 +4171,15 @@ func (s *DockerCLIRunSuite) TestRunEmptyEnv(c *testing.T) {
 
 	out, _, err := dockerCmdWithError("run", "-e", "", "busybox", "true")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, expectedOutput))
+	assert.Assert(c, is.Contains(out, expectedOutput))
 
 	out, _, err = dockerCmdWithError("run", "-e", "=", "busybox", "true")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, expectedOutput))
+	assert.Assert(c, is.Contains(out, expectedOutput))
 
 	out, _, err = dockerCmdWithError("run", "-e", "=foo", "busybox", "true")
 	assert.ErrorContains(c, err, "")
-	assert.Assert(c, strings.Contains(out, expectedOutput))
+	assert.Assert(c, is.Contains(out, expectedOutput))
 }
 
 // #28658
@@ -4225,7 +4230,7 @@ func (s *DockerCLIRunSuite) TestRunMountReadOnlyDevShm(c *testing.T) {
 		"-v", fmt.Sprintf("%s:/dev/shm:ro", emptyDir),
 		"busybox", "touch", "/dev/shm/foo")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "Read-only file system"))
+	assert.Assert(c, is.Contains(out, "Read-only file system"))
 }
 
 func (s *DockerCLIRunSuite) TestRunMount(c *testing.T) {
@@ -4408,20 +4413,20 @@ func (s *DockerCLIRunSuite) TestRunMount(c *testing.T) {
 func (s *DockerCLIRunSuite) TestRunHostnameFQDN(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 
-	expectedOutput := "foobar.example.com\nfoobar.example.com\nfoobar\nexample.com\nfoobar.example.com"
+	expectedOutput := "foobar.example.com\nfoobar.example.com\nfoobar\nexample.com\nfoobar.example.com" //nolint:dupword
 	out := cli.DockerCmd(c, "run", "--hostname=foobar.example.com", "busybox", "sh", "-c", `cat /etc/hostname && hostname && hostname -s && hostname -d && hostname -f`).Combined()
 	assert.Equal(c, strings.TrimSpace(out), expectedOutput)
 
 	out = cli.DockerCmd(c, "run", "--hostname=foobar.example.com", "busybox", "sh", "-c", `cat /etc/hosts`).Combined()
 	expectedOutput = "foobar.example.com foobar"
-	assert.Assert(c, strings.Contains(strings.TrimSpace(out), expectedOutput))
+	assert.Assert(c, is.Contains(strings.TrimSpace(out), expectedOutput))
 }
 
 // Test case for 29129
 func (s *DockerCLIRunSuite) TestRunHostnameInHostMode(c *testing.T) {
 	testRequires(c, DaemonIsLinux, NotUserNamespace)
 
-	const expectedOutput = "foobar\nfoobar"
+	const expectedOutput = "foobar\nfoobar" //nolint:dupword
 	out := cli.DockerCmd(c, "run", "--net=host", "--hostname=foobar", "busybox", "sh", "-c", `echo $HOSTNAME && hostname`).Combined()
 	assert.Equal(c, strings.TrimSpace(out), expectedOutput)
 }

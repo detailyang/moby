@@ -3,28 +3,27 @@ package daemon // import "github.com/docker/docker/daemon"
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
-	imagetypes "github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
+	"github.com/docker/docker/internal/metrics"
 	"github.com/docker/docker/internal/multierror"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/runconfig"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/selinux/go-selinux"
-	archvariant "github.com/tonistiigi/go-archvariant"
+	"github.com/tonistiigi/go-archvariant"
 )
 
 type createOpts struct {
@@ -62,10 +61,6 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	if opts.params.Config == nil {
 		return containertypes.CreateResponse{}, errdefs.InvalidParameter(runconfig.ErrEmptyConfig)
 	}
-	// TODO(thaJeztah): remove logentries check and migration code in release v26.0.0.
-	if opts.params.HostConfig != nil && opts.params.HostConfig.LogConfig.Type == "logentries" {
-		return containertypes.CreateResponse{}, errdefs.InvalidParameter(fmt.Errorf("the logentries logging driver has been deprecated and removed"))
-	}
 
 	// Normalize some defaults. Doing this "ad-hoc" here for now, as there's
 	// only one field to migrate, but we should consider having a better
@@ -83,7 +78,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	}
 
 	if opts.params.Platform == nil && opts.params.Config.Image != "" {
-		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
 		if err != nil {
 			return containertypes.CreateResponse{}, err
 		}
@@ -109,7 +104,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	if opts.params.HostConfig == nil {
 		opts.params.HostConfig = &containertypes.HostConfig{}
 	}
-	err = daemon.adaptContainerSettings(&daemonCfg.Config, opts.params.HostConfig, opts.params.AdjustCPUShares)
+	err = daemon.adaptContainerSettings(&daemonCfg.Config, opts.params.HostConfig)
 	if err != nil {
 		return containertypes.CreateResponse{Warnings: warnings}, errdefs.InvalidParameter(err)
 	}
@@ -118,7 +113,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	if err != nil {
 		return containertypes.CreateResponse{Warnings: warnings}, err
 	}
-	containerActions.WithValues("create").UpdateSince(start)
+	metrics.ContainerActions.WithValues("create").UpdateSince(start)
 
 	if warnings == nil {
 		warnings = make([]string, 0) // Create an empty slice to avoid https://github.com/moby/moby/issues/38222
@@ -135,35 +130,28 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 		imgManifest *ocispec.Descriptor
 		imgID       image.ID
 		err         error
-		os          = runtime.GOOS
+		platform    = platforms.DefaultSpec()
 	)
 
 	if opts.params.Config.Image != "" {
-		img, err = daemon.imageService.GetImage(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+		img, err = daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
 		if err != nil {
 			return nil, err
 		}
-		// when using the containerd store, we need to get the actual
-		// image manifest so we can store it and later deterministically
-		// resolve the specific image the container is running
-		if daemon.UsesSnapshotter() {
-			imgManifest, err = daemon.imageService.GetImageManifest(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
-			if err != nil {
-				log.G(ctx).WithError(err).Error("failed to find image manifest")
-				return nil, err
-			}
+		if img.Details != nil {
+			imgManifest = img.Details.ManifestDescriptor
 		}
-		os = img.OperatingSystem()
+		platform = img.Platform()
 		imgID = img.ID()
 	} else if isWindows {
-		os = "linux" // 'scratch' case.
+		platform.OS = "linux" // 'scratch' case.
 	}
 
 	// On WCOW, if are not being invoked by the builder to create this container (where
 	// ignoreImagesArgEscaped will be true) - if the image already has its arguments escaped,
 	// ensure that this is replicated across to the created container to avoid double-escaping
 	// of the arguments/command line when the runtime attempts to run the container.
-	if os == "windows" && !opts.ignoreImagesArgsEscaped && img != nil && img.RunConfig().ArgsEscaped {
+	if platform.OS == "windows" && !opts.ignoreImagesArgsEscaped && img != nil && img.RunConfig().ArgsEscaped {
 		opts.params.Config.ArgsEscaped = true
 	}
 
@@ -175,7 +163,7 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 		return nil, errdefs.InvalidParameter(err)
 	}
 
-	if ctr, err = daemon.newContainer(opts.params.Name, os, opts.params.Config, opts.params.HostConfig, imgID, opts.managed); err != nil {
+	if ctr, err = daemon.newContainer(opts.params.Name, platform, opts.params.Config, opts.params.HostConfig, imgID, opts.managed); err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -197,18 +185,12 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 	ctr.HostConfig.StorageOpt = opts.params.HostConfig.StorageOpt
 	ctr.ImageManifest = imgManifest
 
-	if daemon.UsesSnapshotter() {
-		if err := daemon.imageService.PrepareSnapshot(ctx, ctr.ID, opts.params.Config.Image, opts.params.Platform, setupInitLayer(daemon.idMapping)); err != nil {
-			return nil, err
-		}
-	} else {
-		// Set RWLayer for container after mount labels have been set
-		rwLayer, err := daemon.imageService.CreateLayer(ctr, setupInitLayer(daemon.idMapping))
-		if err != nil {
-			return nil, errdefs.System(err)
-		}
-		ctr.RWLayer = rwLayer
+	// Set RWLayer for container after mount labels have been set
+	rwLayer, err := daemon.imageService.CreateLayer(ctr, setupInitLayer(daemon.idMapping))
+	if err != nil {
+		return nil, errdefs.System(err)
 	}
+	ctr.RWLayer = rwLayer
 
 	current := idtools.CurrentIdentity()
 	if err := idtools.MkdirAndChown(ctr.Root, 0o710, idtools.Identity{UID: current.UID, GID: daemon.IdentityMapping().RootPair().GID}); err != nil {
@@ -218,11 +200,11 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 		return nil, err
 	}
 
-	if err := daemon.setHostConfig(ctr, opts.params.HostConfig); err != nil {
+	if err := daemon.setHostConfig(ctr, opts.params.HostConfig, opts.params.DefaultReadOnlyNonRecursive); err != nil {
 		return nil, err
 	}
 
-	if err := daemon.createContainerOSSpecificSettings(ctr, opts.params.Config, opts.params.HostConfig); err != nil {
+	if err := daemon.createContainerOSSpecificSettings(ctx, ctr, opts.params.Config, opts.params.HostConfig); err != nil {
 		return nil, err
 	}
 
@@ -232,13 +214,15 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 	}
 	// Make sure NetworkMode has an acceptable value. We do this to ensure
 	// backwards API compatibility.
-	runconfig.SetDefaultNetModeIfBlank(ctr.HostConfig)
+	if ctr.HostConfig != nil && ctr.HostConfig.NetworkMode == "" {
+		ctr.HostConfig.NetworkMode = networktypes.NetworkDefault
+	}
 
 	daemon.updateContainerNetworkSettings(ctr, endpointsConfigs)
-	if err := daemon.Register(ctr); err != nil {
+	if err := daemon.register(ctx, ctr); err != nil {
 		return nil, err
 	}
-	stateCtr.set(ctr.ID, "stopped")
+	metrics.StateCtr.Set(ctr.ID, "stopped")
 	daemon.LogContainerEvent(ctr, events.ActionCreate)
 	return ctr, nil
 }
