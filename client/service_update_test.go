@@ -23,6 +23,26 @@ func TestServiceUpdateError(t *testing.T) {
 
 	_, err := client.ServiceUpdate(context.Background(), "service_id", swarm.Version{}, swarm.ServiceSpec{}, types.ServiceUpdateOptions{})
 	assert.Check(t, is.ErrorType(err, errdefs.IsSystem))
+
+	_, err = client.ServiceUpdate(context.Background(), "", swarm.Version{}, swarm.ServiceSpec{}, types.ServiceUpdateOptions{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+
+	_, err = client.ServiceUpdate(context.Background(), "    ", swarm.Version{}, swarm.ServiceSpec{}, types.ServiceUpdateOptions{})
+	assert.Check(t, is.ErrorType(err, errdefs.IsInvalidParameter))
+	assert.Check(t, is.ErrorContains(err, "value is empty"))
+}
+
+// TestServiceUpdateConnectionError verifies that connection errors occurring
+// during API-version negotiation are not shadowed by API-version errors.
+//
+// Regression test for https://github.com/docker/cli/issues/4890
+func TestServiceUpdateConnectionError(t *testing.T) {
+	client, err := NewClientWithOpts(WithAPIVersionNegotiation(), WithHost("tcp://no-such-host.invalid"))
+	assert.NilError(t, err)
+
+	_, err = client.ServiceUpdate(context.Background(), "service_id", swarm.Version{}, swarm.ServiceSpec{}, types.ServiceUpdateOptions{})
+	assert.Check(t, is.ErrorType(err, IsErrConnectionFailed))
 }
 
 func TestServiceUpdate(t *testing.T) {

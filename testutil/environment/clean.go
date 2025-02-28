@@ -2,17 +2,18 @@ package environment // import "github.com/docker/docker/testutil/environment"
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/internal/lazyregexp"
 	"go.opentelemetry.io/otel"
 	"gotest.tools/v3/assert"
 )
@@ -52,7 +53,7 @@ func unpauseAllContainers(ctx context.Context, t testing.TB, client client.Conta
 	}
 }
 
-func getPausedContainers(ctx context.Context, t testing.TB, client client.ContainerAPIClient) []types.Container {
+func getPausedContainers(ctx context.Context, t testing.TB, client client.ContainerAPIClient) []container.Summary {
 	t.Helper()
 	containers, err := client.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("status", "paused")),
@@ -62,7 +63,8 @@ func getPausedContainers(ctx context.Context, t testing.TB, client client.Contai
 	return containers
 }
 
-var alreadyExists = regexp.MustCompile(`Error response from daemon: removal of container (\w+) is already in progress`)
+// FIXME(thaJeztah): can we rewrite this check to not do string-matching, and instead detect error-type?
+var alreadyExists = lazyregexp.New(`Error response from daemon: removal of container (\w+) is already in progress`)
 
 func deleteAllContainers(ctx context.Context, t testing.TB, apiclient client.ContainerAPIClient, protectedContainers map[string]struct{}) {
 	t.Helper()
@@ -86,7 +88,7 @@ func deleteAllContainers(ctx context.Context, t testing.TB, apiclient client.Con
 	}
 }
 
-func getAllContainers(ctx context.Context, t testing.TB, client client.ContainerAPIClient) []types.Container {
+func getAllContainers(ctx context.Context, t testing.TB, client client.ContainerAPIClient) []container.Summary {
 	t.Helper()
 	containers, err := client.ContainerList(ctx, container.ListOptions{
 		All: true,
@@ -97,16 +99,16 @@ func getAllContainers(ctx context.Context, t testing.TB, client client.Container
 
 func deleteAllImages(ctx context.Context, t testing.TB, apiclient client.ImageAPIClient, protectedImages map[string]struct{}) {
 	t.Helper()
-	images, err := apiclient.ImageList(ctx, types.ImageListOptions{})
+	images, err := apiclient.ImageList(ctx, image.ListOptions{})
 	assert.Check(t, err, "failed to list images")
 
-	for _, image := range images {
-		tags := tagsFromImageSummary(image)
-		if _, ok := protectedImages[image.ID]; ok {
+	for _, img := range images {
+		tags := tagsFromImageSummary(img)
+		if _, ok := protectedImages[img.ID]; ok {
 			continue
 		}
 		if len(tags) == 0 {
-			removeImage(ctx, t, apiclient, image.ID)
+			removeImage(ctx, t, apiclient, img.ID)
 			continue
 		}
 		for _, tag := range tags {
@@ -119,7 +121,7 @@ func deleteAllImages(ctx context.Context, t testing.TB, apiclient client.ImageAP
 
 func removeImage(ctx context.Context, t testing.TB, apiclient client.ImageAPIClient, ref string) {
 	t.Helper()
-	_, err := apiclient.ImageRemove(ctx, ref, types.ImageRemoveOptions{
+	_, err := apiclient.ImageRemove(ctx, ref, image.RemoveOptions{
 		Force: true,
 	})
 	if errdefs.IsNotFound(err) {
@@ -148,7 +150,7 @@ func deleteAllVolumes(ctx context.Context, t testing.TB, c client.VolumeAPIClien
 
 func deleteAllNetworks(ctx context.Context, t testing.TB, c client.NetworkAPIClient, daemonPlatform string, protectedNetworks map[string]struct{}) {
 	t.Helper()
-	networks, err := c.NetworkList(ctx, types.NetworkListOptions{})
+	networks, err := c.NetworkList(ctx, network.ListOptions{})
 	assert.Check(t, err, "failed to list networks")
 
 	for _, n := range networks {

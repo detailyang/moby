@@ -32,12 +32,8 @@ func setupBridgeIPv4(config *networkConfiguration, i *bridgeInterface) error {
 	//             are decoupled, we should assign it only when it's really needed.
 	i.bridgeIPv4 = config.AddressIPv4
 
-	if config.Internal {
-		return nil
-	}
-
-	if !config.InhibitIPv4 {
-		addrv4List, _, err := i.addresses()
+	if !config.InhibitIPv4 && !config.GwModeIPv4.isolated() {
+		addrv4List, err := i.addresses(netlink.FAMILY_V4)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve bridge interface addresses: %v", err)
 		}
@@ -52,20 +48,22 @@ func setupBridgeIPv4(config *networkConfiguration, i *bridgeInterface) error {
 			}
 			log.G(context.TODO()).Debugf("Assigning address to bridge interface %s: %s", config.BridgeName, config.AddressIPv4)
 			if err := i.nlh.AddrAdd(i.Link, &netlink.Addr{IPNet: config.AddressIPv4}); err != nil {
-				return &IPv4AddrAddError{IP: config.AddressIPv4, Err: err}
+				return fmt.Errorf("failed to add IPv4 address %s to bridge: %v", config.AddressIPv4, err)
 			}
 		}
 	}
 
-	// Store the default gateway
-	i.gatewayIPv4 = config.AddressIPv4.IP
+	if !config.Internal {
+		// Store the default gateway
+		i.gatewayIPv4 = config.AddressIPv4.IP
+	}
 
 	return nil
 }
 
 func setupGatewayIPv4(config *networkConfiguration, i *bridgeInterface) error {
 	if !i.bridgeIPv4.Contains(config.DefaultGatewayIPv4) {
-		return &ErrInvalidGateway{}
+		return errInvalidGateway
 	}
 	if config.Internal {
 		return types.InvalidParameterErrorf("no gateway can be set on an internal bridge network")

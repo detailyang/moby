@@ -111,8 +111,9 @@ func TestVolumesRemove(t *testing.T) {
 func TestVolumesRemoveSwarmEnabled(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon, "cannot run daemon when remote daemon")
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "TODO enable on windows")
-	t.Parallel()
 	ctx := setupTest(t)
+
+	t.Parallel()
 
 	// Spin up a new daemon, so that we can run this test in parallel (it's a slow test)
 	d := daemon.New(t)
@@ -198,7 +199,6 @@ func TestVolumesInvalidJSON(t *testing.T) {
 	endpoints := []string{"/volumes/create"}
 
 	for _, ep := range endpoints {
-		ep := ep
 		t.Run(ep[1:], func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)

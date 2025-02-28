@@ -7,12 +7,14 @@ import (
 	nethttp "net/http"
 	"time"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/rootfs"
+	"github.com/containerd/containerd/v2/core/content"
+	c8dimages "github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/gc"
+	"github.com/containerd/containerd/v2/pkg/rootfs"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/docker/docker/builder/builder-next/adapters/containerimage"
+	"github.com/containerd/platforms"
+	imageadapter "github.com/docker/docker/builder/builder-next/adapters/containerimage"
 	mobyexporter "github.com/docker/docker/builder/builder-next/exporter"
 	distmetadata "github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
@@ -23,7 +25,7 @@ import (
 	"github.com/moby/buildkit/cache"
 	cacheconfig "github.com/moby/buildkit/cache/config"
 	"github.com/moby/buildkit/client"
-	"github.com/moby/buildkit/client/llb"
+	"github.com/moby/buildkit/client/llb/sourceresolver"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/exporter"
 	localexporter "github.com/moby/buildkit/exporter/local"
@@ -33,10 +35,12 @@ import (
 	"github.com/moby/buildkit/snapshot"
 	containerdsnapshot "github.com/moby/buildkit/snapshot/containerd"
 	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/solver/llbsolver/cdidevices"
 	"github.com/moby/buildkit/solver/llbsolver/mounts"
 	"github.com/moby/buildkit/solver/llbsolver/ops"
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/source"
+	"github.com/moby/buildkit/source/containerimage"
 	"github.com/moby/buildkit/source/git"
 	"github.com/moby/buildkit/source/http"
 	"github.com/moby/buildkit/source/local"
@@ -75,13 +79,15 @@ type Opt struct {
 	ContentStore      *containerdsnapshot.Store
 	CacheManager      cache.Manager
 	LeaseManager      *leaseutil.Manager
-	ImageSource       *containerimage.Source
+	GarbageCollect    func(context.Context) (gc.Stats, error)
+	ImageSource       *imageadapter.Source
 	DownloadManager   *xfer.LayerDownloadManager
 	V2MetadataService distmetadata.V2MetadataService
 	Transport         nethttp.RoundTripper
 	Exporter          exporter.Exporter
 	Layers            LayerAccess
 	Platforms         []ocispec.Platform
+	CDIManager        *cdidevices.Manager
 }
 
 // Worker is a local worker instance with dedicated snapshotter, cache, and so on.
@@ -182,6 +188,14 @@ func (w *Worker) BuildkitVersion() client.BuildkitVersion {
 	}
 }
 
+func (w *Worker) GarbageCollect(ctx context.Context) error {
+	if w.Opt.GarbageCollect == nil {
+		return nil
+	}
+	_, err := w.Opt.GarbageCollect(ctx)
+	return err
+}
+
 // Close closes the worker and releases all resources
 func (w *Worker) Close() error {
 	return nil
@@ -212,6 +226,49 @@ func (w *Worker) LoadRef(ctx context.Context, id string, hidden bool) (cache.Imm
 	return w.CacheManager().Get(ctx, id, nil, opts...)
 }
 
+func (w *Worker) ResolveSourceMetadata(ctx context.Context, op *pb.SourceOp, opt sourceresolver.Opt, sm *session.Manager, g session.Group) (*sourceresolver.MetaResponse, error) {
+	if opt.SourcePolicies != nil {
+		return nil, errors.New("source policies can not be set for worker")
+	}
+
+	var platform *pb.Platform
+	if p := opt.Platform; p != nil {
+		platform = &pb.Platform{
+			Architecture: p.Architecture,
+			OS:           p.OS,
+			Variant:      p.Variant,
+			OSVersion:    p.OSVersion,
+		}
+	}
+
+	id, err := w.SourceManager.Identifier(&pb.Op_Source{Source: op}, platform)
+	if err != nil {
+		return nil, err
+	}
+
+	switch idt := id.(type) {
+	case *containerimage.ImageIdentifier:
+		if opt.ImageOpt == nil {
+			opt.ImageOpt = &sourceresolver.ResolveImageOpt{}
+		}
+		dgst, config, err := w.ImageSource.ResolveImageConfig(ctx, idt.Reference.String(), opt, sm, g)
+		if err != nil {
+			return nil, err
+		}
+		return &sourceresolver.MetaResponse{
+			Op: op,
+			Image: &sourceresolver.ResolveImageResponse{
+				Digest: dgst,
+				Config: config,
+			},
+		}, nil
+	}
+
+	return &sourceresolver.MetaResponse{
+		Op: op,
+	}, nil
+}
+
 // ResolveOp converts a LLB vertex into a LLB operation
 func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge, sm *session.Manager) (solver.Op, error) {
 	if baseOp, ok := v.Sys().(*pb.Op); ok {
@@ -236,7 +293,7 @@ func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge, sm *se
 }
 
 // ResolveImageConfig returns image config for an image
-func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager, g session.Group) (string, digest.Digest, []byte, error) {
+func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, opt sourceresolver.Opt, sm *session.Manager, g session.Group) (digest.Digest, []byte, error) {
 	return w.ImageSource.ResolveImageConfig(ctx, ref, opt, sm, g)
 }
 
@@ -296,7 +353,7 @@ func (w *Worker) GetRemotes(ctx context.Context, ref cache.ImmutableRef, createI
 	descriptors := make([]ocispec.Descriptor, len(diffIDs))
 	for i, dgst := range diffIDs {
 		descriptors[i] = ocispec.Descriptor{
-			MediaType: images.MediaTypeDockerSchema2Layer,
+			MediaType: c8dimages.MediaTypeDockerSchema2Layer,
 			Digest:    digest.Digest(dgst),
 			Size:      -1,
 		}
@@ -309,13 +366,13 @@ func (w *Worker) GetRemotes(ctx context.Context, ref cache.ImmutableRef, createI
 }
 
 // PruneCacheMounts removes the current cache snapshots for specified IDs
-func (w *Worker) PruneCacheMounts(ctx context.Context, ids []string) error {
+func (w *Worker) PruneCacheMounts(ctx context.Context, ids map[string]bool) error {
 	mu := mounts.CacheMountsLocker()
 	mu.Lock()
 	defer mu.Unlock()
 
-	for _, id := range ids {
-		mds, err := mounts.SearchCacheDir(ctx, w.CacheManager(), id)
+	for id, nested := range ids {
+		mds, err := mounts.SearchCacheDir(ctx, w.CacheManager(), id, nested)
 		if err != nil {
 			return err
 		}
@@ -425,6 +482,10 @@ func (w *Worker) CacheManager() cache.Manager {
 	return w.Opt.CacheManager
 }
 
+func (w *Worker) CDIManager() *cdidevices.Manager {
+	return w.Opt.CDIManager
+}
+
 type discardProgress struct{}
 
 func (*discardProgress) WriteProgress(_ pkgprogress.Progress) error {
@@ -525,4 +586,8 @@ type emptyProvider struct{}
 
 func (p *emptyProvider) ReaderAt(ctx context.Context, dec ocispec.Descriptor) (content.ReaderAt, error) {
 	return nil, errors.Errorf("ReaderAt not implemented for empty provider")
+}
+
+func (p *emptyProvider) Info(ctx context.Context, d digest.Digest) (content.Info, error) {
+	return content.Info{}, errors.Wrapf(cerrdefs.ErrNotImplemented, "Info not implemented for empty provider")
 }

@@ -2,7 +2,6 @@ package kvstore
 
 import (
 	"errors"
-	"time"
 )
 
 // Backend represents a KV Store Backend
@@ -23,13 +22,6 @@ var (
 	// ErrKeyExists is thrown when the previous value exists in the case of an AtomicPut
 	ErrKeyExists = errors.New("Previous K/V pair exists, cannot complete Atomic operation")
 )
-
-// Config contains the options for a storage client
-type Config struct {
-	ConnectionTimeout time.Duration
-	Bucket            string
-	PersistConnection bool
-}
 
 // Store represents the backend K/V storage
 // Each store should support every call listed
@@ -52,11 +44,15 @@ type Store interface {
 	// AtomicDelete performs an atomic delete of a single value.
 	AtomicDelete(key string, previous *KVPair) error
 
+	// Delete deletes a value at "key". Unlike AtomicDelete it doesn't check
+	// whether the deleted key is at a specific version before deleting.
+	Delete(key string) error
+
 	// Close the store connection
 	Close()
 }
 
-// KVPair represents {Key, Value, Lastindex} tuple
+// KVPair represents {Key, Value, LastIndex} tuple
 type KVPair struct {
 	Key       string
 	Value     []byte

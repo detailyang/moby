@@ -1,5 +1,14 @@
 name: test
 
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -10,12 +19,15 @@ on:
     branches:
       - 'master'
       - '[0-9]+.[0-9]+'
-    tags:
-      - 'v*'
+      - '[0-9]+.x'
   pull_request:
 
 env:
-  GO_VERSION: "1.21.5"
+  GO_VERSION: "1.23.6"
+  GIT_PAGER: "cat"
+  PAGER: "cat"
+  SETUP_BUILDX_VERSION: edge
+  SETUP_BUILDKIT_IMAGE: moby/buildkit:latest
 
 jobs:
   validate-dco:
@@ -23,6 +35,7 @@ jobs:
 
   build-dev:
     runs-on: ubuntu-20.04
+    timeout-minutes: 120 # guardrails timeout for the whole job
     needs:
       - validate-dco
     strategy:
@@ -39,14 +52,15 @@ jobs:
             echo "SYSTEMD=true" >> $GITHUB_ENV
           fi
       -
-        name: Checkout
-        uses: actions/checkout@v3
-      -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v6
         with:
           targets: dev
           set: |
@@ -54,25 +68,24 @@ jobs:
             *.cache-to=type=gha,scope=dev${{ matrix.mode }},mode=max
             *.output=type=cacheonly
 
-  test-prepare:
-    uses: ./.github/workflows/.test-prepare.yml
-    needs:
-      - validate-dco
-
   test:
     needs:
-      - test-prepare
       - build-dev
+      - validate-dco
     uses: ./.github/workflows/.test.yml
+    secrets: inherit
     strategy:
       fail-fast: false
       matrix:
-        storage: ${{ fromJson(needs.test-prepare.outputs.matrix) }}
+        storage:
+          - graphdriver
+          - snapshotter
     with:
       storage: ${{ matrix.storage }}
 
   validate-prepare:
     runs-on: ubuntu-20.04
+    timeout-minutes: 10 # guardrails timeout for the whole job
     needs:
       - validate-dco
     outputs:
@@ -80,7 +93,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Create matrix
         id: scripts
@@ -94,7 +107,7 @@ jobs:
 
   validate:
     runs-on: ubuntu-20.04
-    timeout-minutes: 120
+    timeout-minutes: 30 # guardrails timeout for the whole job
     needs:
       - validate-prepare
       - build-dev
@@ -105,7 +118,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       -
@@ -113,10 +126,14 @@ jobs:
         uses: ./.github/actions/setup-runner
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v6
         with:
           targets: dev
           set: |
@@ -128,6 +145,7 @@ jobs:
 
   smoke-prepare:
     runs-on: ubuntu-20.04
+    timeout-minutes: 10 # guardrails timeout for the whole job
     needs:
       - validate-dco
     outputs:
@@ -135,7 +153,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Create matrix
         id: platforms
@@ -149,6 +167,7 @@ jobs:
 
   smoke:
     runs-on: ubuntu-20.04
+    timeout-minutes: 20 # guardrails timeout for the whole job
     needs:
       - smoke-prepare
     strategy:
@@ -157,22 +176,23 @@ jobs:
         platform: ${{ fromJson(needs.smoke-prepare.outputs.matrix) }}
     steps:
       -
-        name: Checkout
-        uses: actions/checkout@v3
-      -
         name: Prepare
         run: |
           platform=${{ matrix.platform }}
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       -
         name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ env.SETUP_BUILDX_VERSION }}
+          driver-opts: image=${{ env.SETUP_BUILDKIT_IMAGE }}
+          buildkitd-flags: --debug
       -
         name: Test
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v6
         with:
           targets: binary-smoketest
           set: |

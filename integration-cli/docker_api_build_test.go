@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/fakecontext"
 	"github.com/docker/docker/testutil/fakegit"
@@ -320,7 +320,7 @@ func (s *DockerAPISuite) TestBuildOnBuildCache(c *testing.T) {
 	// check parentID is correct
 	// Parent is graphdriver-only
 	if !testEnv.UsingSnapshotter() {
-		image, _, err := client.ImageInspectWithRaw(ctx, childID)
+		image, err := client.ImageInspect(ctx, childID)
 		assert.NilError(c, err)
 
 		assert.Check(c, is.Equal(parentID, image.Parent))
@@ -336,7 +336,7 @@ func (s *DockerRegistrySuite) TestBuildCopyFromForcePull(c *testing.T) {
 	err := client.ImageTag(ctx, "busybox", repoName)
 	assert.Check(c, err)
 	// push the image to the registry
-	rc, err := client.ImagePush(ctx, repoName, types.ImagePushOptions{RegistryAuth: "{}"})
+	rc, err := client.ImagePush(ctx, repoName, image.PushOptions{RegistryAuth: "{}"})
 	assert.Check(c, err)
 	_, err = io.Copy(io.Discard, rc)
 	assert.Check(c, err)

@@ -4,17 +4,25 @@ import (
 	"context"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/testutil"
 	"go.opentelemetry.io/otel"
 	"gotest.tools/v3/assert"
 )
 
-var frozenImages = []string{"busybox:latest", "busybox:glibc", "hello-world:frozen", "debian:bookworm-slim"}
+var frozenImages = []string{
+	"busybox:latest",
+	"busybox:glibc",
+	"hello-world:frozen",
+	"debian:bookworm-slim",
+	"hello-world:amd64",
+	"hello-world:arm64",
+}
 
 type protectedElements struct {
 	containers map[string]struct{}
@@ -38,6 +46,8 @@ func newProtectedElements() protectedElements {
 // volumes, and, on Linux, plugins) from being cleaned up at the end of test
 // runs
 func ProtectAll(ctx context.Context, t testing.TB, testEnv *Execution) {
+	testutil.CheckNotParallel(t)
+
 	t.Helper()
 	ctx, span := otel.Tracer("").Start(ctx, "ProtectAll")
 	defer span.End()
@@ -86,8 +96,8 @@ func getExistingContainers(ctx context.Context, t testing.TB, testEnv *Execution
 // ProtectImage adds the specified image(s) to be protected in case of clean
 func (e *Execution) ProtectImage(t testing.TB, images ...string) {
 	t.Helper()
-	for _, image := range images {
-		e.protectedElements.images[image] = struct{}{}
+	for _, img := range images {
+		e.protectedElements.images[img] = struct{}{}
 	}
 }
 
@@ -106,7 +116,7 @@ func ProtectImages(ctx context.Context, t testing.TB, testEnv *Execution) {
 func getExistingImages(ctx context.Context, t testing.TB, testEnv *Execution) []string {
 	t.Helper()
 	client := testEnv.APIClient()
-	imageList, err := client.ImageList(ctx, types.ImageListOptions{
+	imageList, err := client.ImageList(ctx, image.ListOptions{
 		All:     true,
 		Filters: filters.NewArgs(filters.Arg("dangling", "false")),
 	})
@@ -157,7 +167,7 @@ func ProtectNetworks(ctx context.Context, t testing.TB, testEnv *Execution) {
 func getExistingNetworks(ctx context.Context, t testing.TB, testEnv *Execution) []string {
 	t.Helper()
 	client := testEnv.APIClient()
-	networkList, err := client.NetworkList(ctx, types.NetworkListOptions{})
+	networkList, err := client.NetworkList(ctx, network.ListOptions{})
 	assert.NilError(t, err, "failed to list networks")
 
 	var networks []string

@@ -2,9 +2,7 @@ package container // import "github.com/docker/docker/integration/container"
 
 import (
 	"testing"
-	"time"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/integration/internal/container"
@@ -116,7 +114,7 @@ func TestRenameAnonymousContainer(t *testing.T) {
 	apiClient := testEnv.APIClient()
 
 	networkName := "network1" + t.Name()
-	_, err := apiClient.NetworkCreate(ctx, networkName, types.NetworkCreate{})
+	_, err := apiClient.NetworkCreate(ctx, networkName, network.CreateOptions{})
 
 	assert.NilError(t, err)
 	cID := container.Run(ctx, t, apiClient, func(c *container.TestContainerConfig) {
@@ -146,7 +144,7 @@ func TestRenameAnonymousContainer(t *testing.T) {
 		}
 		c.HostConfig.NetworkMode = containertypes.NetworkMode(networkName)
 	}, container.WithCmd("ping", count, "1", container1Name))
-	poll.WaitOn(t, container.IsInState(ctx, apiClient, cID, "exited"), poll.WithDelay(100*time.Millisecond))
+	poll.WaitOn(t, container.IsInState(ctx, apiClient, cID, "exited"))
 
 	inspect, err := apiClient.ContainerInspect(ctx, cID)
 	assert.NilError(t, err)
@@ -191,4 +189,26 @@ func TestRenameContainerWithLinkedContainer(t *testing.T) {
 	inspect, err := apiClient.ContainerInspect(ctx, app2Name+"/mysql")
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(db1ID, inspect.ID))
+}
+
+// Regression test for https://github.com/moby/moby/issues/47186
+func TestRenameContainerTwice(t *testing.T) {
+	ctx := setupTest(t)
+	apiClient := testEnv.APIClient()
+
+	ctrName := "c0"
+	container.Run(ctx, t, apiClient, container.WithName("c0"))
+	defer func() {
+		container.Remove(ctx, t, apiClient, ctrName, containertypes.RemoveOptions{
+			Force: true,
+		})
+	}()
+
+	err := apiClient.ContainerRename(ctx, "c0", "c1")
+	assert.NilError(t, err)
+	ctrName = "c1"
+
+	err = apiClient.ContainerRename(ctx, "c1", "c2")
+	assert.NilError(t, err)
+	ctrName = "c2"
 }

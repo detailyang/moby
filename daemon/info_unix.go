@@ -4,13 +4,14 @@ package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	v2runcoptions "github.com/containerd/containerd/runtime/v2/runc/options"
+	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	"github.com/containerd/log"
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
@@ -20,7 +21,7 @@ import (
 	"github.com/docker/docker/pkg/rootless"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/pkg/errors"
-	rkclient "github.com/rootless-containers/rootlesskit/pkg/api/client"
+	rkclient "github.com/rootless-containers/rootlesskit/v2/pkg/api/client"
 )
 
 // fillPlatformInfo fills the platform related info.
@@ -43,14 +44,22 @@ func (daemon *Daemon) fillPlatformInfo(ctx context.Context, v *system.Info, sysI
 		v.CPUSet = sysInfo.Cpuset
 		v.PidsLimit = sysInfo.PidsLimit
 	}
-	v.Runtimes = make(map[string]system.Runtime)
+	v.Runtimes = make(map[string]system.RuntimeWithStatus)
 	for n, p := range stockRuntimes() {
-		v.Runtimes[n] = system.Runtime{Path: p}
+		v.Runtimes[n] = system.RuntimeWithStatus{
+			Runtime: system.Runtime{
+				Path: p,
+			},
+			Status: daemon.runtimeStatus(ctx, cfg, n),
+		}
 	}
 	for n, r := range cfg.Config.Runtimes {
-		v.Runtimes[n] = system.Runtime{
-			Path: r.Path,
-			Args: append([]string(nil), r.Args...),
+		v.Runtimes[n] = system.RuntimeWithStatus{
+			Runtime: system.Runtime{
+				Path: r.Path,
+				Args: append([]string(nil), r.Args...),
+			},
+			Status: daemon.runtimeStatus(ctx, cfg, n),
 		}
 	}
 	v.DefaultRuntime = cfg.Runtimes.Default
@@ -150,12 +159,6 @@ func (daemon *Daemon) fillPlatformInfo(ctx context.Context, v *system.Info, sysI
 	if !v.IPv4Forwarding {
 		v.Warnings = append(v.Warnings, "WARNING: IPv4 forwarding is disabled")
 	}
-	if !v.BridgeNfIptables {
-		v.Warnings = append(v.Warnings, "WARNING: bridge-nf-call-iptables is disabled")
-	}
-	if !v.BridgeNfIP6tables {
-		v.Warnings = append(v.Warnings, "WARNING: bridge-nf-call-ip6tables is disabled")
-	}
 	return nil
 }
 
@@ -187,7 +190,6 @@ func populateRuncCommit(v *system.Commit, cfg *configStore) error {
 		return err
 	}
 	v.ID = commit
-	v.Expected = commit
 	return nil
 }
 
@@ -214,7 +216,6 @@ func (daemon *Daemon) populateInitCommit(ctx context.Context, v *system.Info, cf
 		return nil
 	}
 	v.InitCommit.ID = commit
-	v.InitCommit.Expected = v.InitCommit.ID
 	return nil
 }
 
@@ -230,16 +231,27 @@ func (daemon *Daemon) fillRootlessVersion(ctx context.Context, v *types.Version)
 	if err != nil {
 		return errors.Wrap(err, "failed to retrieve RootlessKit version")
 	}
-	v.Components = append(v.Components, types.ComponentVersion{
+	rlV := types.ComponentVersion{
 		Name:    "rootlesskit",
 		Version: rlInfo.Version,
 		Details: map[string]string{
-			"ApiVersion":    rlInfo.APIVersion,
-			"StateDir":      rlInfo.StateDir,
-			"NetworkDriver": rlInfo.NetworkDriver.Driver,
-			"PortDriver":    rlInfo.PortDriver.Driver,
+			"ApiVersion": rlInfo.APIVersion,
+			"StateDir":   rlInfo.StateDir,
 		},
-	})
+	}
+	if netDriver := rlInfo.NetworkDriver; netDriver != nil {
+		// netDriver is nil for the "host" network driver
+		// (not used for Rootless Docker)
+		rlV.Details["NetworkDriver"] = netDriver.Driver
+	}
+	if portDriver := rlInfo.PortDriver; portDriver != nil {
+		// portDriver is nil for the "implicit" port driver
+		// (used with "pasta" network driver)
+		//
+		// Because the ports are not managed via RootlessKit API in this case.
+		rlV.Details["PortDriver"] = portDriver.Driver
+	}
+	v.Components = append(v.Components, rlV)
 
 	switch rlInfo.NetworkDriver.Driver {
 	case "slirp4netns":
@@ -375,7 +387,7 @@ func parseDefaultRuntimeVersion(rts *runtimes) (runtime, version, commit string,
 	if err != nil {
 		return "", "", "", err
 	}
-	shimopts, ok := opts.(*v2runcoptions.Options)
+	shimopts, ok := opts.(*runcoptions.Options)
 	if !ok {
 		return "", "", "", fmt.Errorf("%s: retrieving version not supported", shim)
 	}
@@ -417,7 +429,6 @@ func (daemon *Daemon) populateContainerdCommit(ctx context.Context, v *system.Co
 		return nil
 	}
 	v.ID = rv.Revision
-	v.Expected = rv.Revision
 	return nil
 }
 
@@ -485,4 +496,25 @@ func populateInitVersion(ctx context.Context, cfg *configStore, v *types.Version
 		},
 	})
 	return nil
+}
+
+// ociRuntimeFeaturesKey is the "well-known" key used for including the
+// OCI runtime spec "features" struct.
+//
+// see https://github.com/opencontainers/runtime-spec/blob/main/features.md
+const ociRuntimeFeaturesKey = "org.opencontainers.runtime-spec.features"
+
+func (daemon *Daemon) runtimeStatus(ctx context.Context, cfg *configStore, runtimeName string) map[string]string {
+	m := make(map[string]string)
+	if runtimeName == "" {
+		runtimeName = cfg.Runtimes.Default
+	}
+	if features := cfg.Runtimes.Features(runtimeName); features != nil {
+		if j, err := json.Marshal(features); err == nil {
+			m[ociRuntimeFeaturesKey] = string(j)
+		} else {
+			log.G(ctx).WithFields(log.Fields{"error": err, "runtime": runtimeName}).Warn("Failed to call json.Marshal for the OCI features struct of runtime")
+		}
+	}
+	return m
 }
